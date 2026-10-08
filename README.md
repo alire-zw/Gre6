@@ -1,11 +1,12 @@
-﻿# GRE6 Tunnel (fixed)
+﻿# Universal Iran–Kharej Tunnel
 
-تونل GRE6 بین سرور ایران و خارج — بدون بلاک whitelist رنج‌ها، با پشتیبانی Native IPv6 و 6to4.
+نسخه اصلاح‌شده برای کار روی بیشتر سرورها.
 
-اسکریپت روی هر دو سرور یکی است؛ فقط موقع منو روی ایران `1` و روی خارج `2` را می‌زنید.
-آدرس دانلود فرق دارد چون از ایران گاهی GitHub باز نیست.
+**پیش‌فرض پیشنهادی: FOU (GRE داخل UDP روی IPv4)** — چون GRE خام / GRE6 روی خیلی از رنج‌ها فیلتر می‌شود.
 
-## نصب و اجرا
+اگر کرنل FOU نداشت، از **WireGuard** استفاده کنید.
+
+## نصب
 
 ### سرور ایران
 
@@ -19,4 +20,16 @@ wget -qO gre6-tunnel.sh https://cdn.jsdelivr.net/gh/alire-zw/Gre6@main/gre6-tunn
 wget -qO gre6-tunnel.sh https://raw.githubusercontent.com/alire-zw/Gre6/main/gre6-tunnel.sh && chmod +x gre6-tunnel.sh && ./gre6-tunnel.sh
 ```
 
-اگر IPv6 عمومی ندارید یا Native کار نکرد، هر دو طرف حالت `6to4` را انتخاب کنید.
+## تنظیم
+
+1. روی هر دو سرور اول گزینه `3` (Remove) اگر قبلاً نصب بوده
+2. خارج: گزینه `2` — Transport = `5) Auto` یا `1) FOU`
+3. ایران: گزینه `1` — همان Transport و همان UDP port (پیش‌فرض `5555`)
+4. MTU: برای FOU معمولاً `1400`، اگر مشکل بود `1280`
+5. تست: از ایران `ping 172.16.1.2`
+
+اگر jsDelivr کش قدیمی داد:
+
+```bash
+wget -qO gre6-tunnel.sh "https://raw.githubusercontent.com/alire-zw/Gre6/main/gre6-tunnel.sh" && chmod +x gre6-tunnel.sh && ./gre6-tunnel.sh
+```
