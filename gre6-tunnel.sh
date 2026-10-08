@@ -29,10 +29,11 @@ IRAN_TUN_HOST="172.16.1.1"
 KHAREJ_TUN_HOST="172.16.1.2"
 
 # Private IPv6 for 6to4 underlay (when native IPv6 is unavailable)
-SIT_IRAN_V6="fd00:6t04:a::1/64"
-SIT_KHAREJ_V6="fd00:6t04:a::2/64"
-SIT_IRAN_HOST="fd00:6t04:a::1"
-SIT_KHAREJ_HOST="fd00:6t04:a::2"
+# Must be valid hex only (0-9, a-f) — e.g. NOT "6t04"
+SIT_IRAN_V6="fd00:6404:a::1/64"
+SIT_KHAREJ_V6="fd00:6404:a::2/64"
+SIT_IRAN_HOST="fd00:6404:a::1"
+SIT_KHAREJ_HOST="fd00:6404:a::2"
 
 COLOR_RESET="\033[0m"
 COLOR_GREEN="\033[0;32m"
@@ -274,7 +275,7 @@ write_managed_scripts() {
 
     cat > "$UP_SCRIPT" << 'UPEOF'
 #!/usr/bin/env bash
-set -e
+# Do not use set -e: optional iptables rules must not abort tunnel bring-up.
 
 STATE_FILE="/etc/gre6-tunnel/state.conf"
 NAT_CHAIN="GRE6_TUNNEL"
@@ -286,6 +287,11 @@ source "$STATE_FILE"
 UNDERLAY="${UNDERLAY:-native}"
 MTU="${MTU:-1400}"
 SIT_MTU="${SIT_MTU:-1480}"
+# Fallbacks if older/broken state files had invalid SIT addrs
+SIT_IRAN_V6="${SIT_IRAN_V6:-fd00:6404:a::1/64}"
+SIT_KHAREJ_V6="${SIT_KHAREJ_V6:-fd00:6404:a::2/64}"
+SIT_IRAN_HOST="${SIT_IRAN_HOST:-fd00:6404:a::1}"
+SIT_KHAREJ_HOST="${SIT_KHAREJ_HOST:-fd00:6404:a::2}"
 
 sysctl -w net.ipv4.conf.all.forwarding=1 >/dev/null 2>&1 || true
 sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
@@ -308,70 +314,67 @@ if ip link show SIT6 >/dev/null 2>&1; then
     ip link delete SIT6 2>/dev/null || true
 fi
 
-resolve_endpoints() {
-    if [ "$UNDERLAY" = "6to4" ]; then
-        # Build private IPv6 path over public IPv4 via SIT
-        if [ "$MODE" = "iran" ]; then
-            ip tunnel add SIT6 mode sit remote "$KHAREJ_IP" local "$IRAN_IP" ttl 255
-            ip link set SIT6 mtu "$SIT_MTU"
-            ip link set SIT6 up
-            ip -6 addr add "$SIT_IRAN_V6" dev SIT6
-            LOCAL_V6="$SIT_IRAN_HOST"
-            REMOTE_V6="$SIT_KHAREJ_HOST"
-        else
-            ip tunnel add SIT6 mode sit remote "$IRAN_IP" local "$KHAREJ_IP" ttl 255
-            ip link set SIT6 mtu "$SIT_MTU"
-            ip link set SIT6 up
-            ip -6 addr add "$SIT_KHAREJ_V6" dev SIT6
-            LOCAL_V6="$SIT_KHAREJ_HOST"
-            REMOTE_V6="$SIT_IRAN_HOST"
-        fi
-        # Give SIT a moment before GRE6
-        sleep 1
-    else
-        if [ "$MODE" = "iran" ]; then
-            LOCAL_V6="$IRAN_IP"
-            REMOTE_V6="$KHAREJ_IP"
-        else
-            LOCAL_V6="$KHAREJ_IP"
-            REMOTE_V6="$IRAN_IP"
-        fi
-    fi
-}
+LOCAL_V6=""
+REMOTE_V6=""
 
-resolve_endpoints
+if [ "$UNDERLAY" = "6to4" ]; then
+    # Private IPv6 over public IPv4 via SIT (proto 41)
+    if [ "$MODE" = "iran" ]; then
+        ip tunnel add SIT6 mode sit remote "$KHAREJ_IP" local "$IRAN_IP" ttl 255 || exit 1
+        ip link set SIT6 mtu "$SIT_MTU"
+        ip link set SIT6 up
+        ip -6 addr add "$SIT_IRAN_V6" dev SIT6 || exit 1
+        LOCAL_V6="$SIT_IRAN_HOST"
+        REMOTE_V6="$SIT_KHAREJ_HOST"
+    else
+        ip tunnel add SIT6 mode sit remote "$IRAN_IP" local "$KHAREJ_IP" ttl 255 || exit 1
+        ip link set SIT6 mtu "$SIT_MTU"
+        ip link set SIT6 up
+        ip -6 addr add "$SIT_KHAREJ_V6" dev SIT6 || exit 1
+        LOCAL_V6="$SIT_KHAREJ_HOST"
+        REMOTE_V6="$SIT_IRAN_HOST"
+    fi
+    sleep 1
+else
+    if [ "$MODE" = "iran" ]; then
+        LOCAL_V6="$IRAN_IP"
+        REMOTE_V6="$KHAREJ_IP"
+    else
+        LOCAL_V6="$KHAREJ_IP"
+        REMOTE_V6="$IRAN_IP"
+    fi
+fi
 
 if [ "$MODE" = "iran" ]; then
-    ip link add name GRE6 type ip6gre local "$LOCAL_V6" remote "$REMOTE_V6"
-    ip addr add 172.16.1.1/30 dev GRE6
+    ip link add name GRE6 type ip6gre local "$LOCAL_V6" remote "$REMOTE_V6" || exit 1
+    ip addr add 172.16.1.1/30 dev GRE6 || true
     ip link set GRE6 mtu "$MTU"
-    ip link set GRE6 up
+    ip link set GRE6 up || exit 1
 
     iptables -t nat -N "$NAT_CHAIN" 2>/dev/null || true
-    iptables -t nat -F "$NAT_CHAIN"
-    iptables -t nat -C PREROUTING -j "$NAT_CHAIN" 2>/dev/null || iptables -t nat -A PREROUTING -j "$NAT_CHAIN"
+    iptables -t nat -F "$NAT_CHAIN" 2>/dev/null || true
+    iptables -t nat -C PREROUTING -j "$NAT_CHAIN" 2>/dev/null || iptables -t nat -A PREROUTING -j "$NAT_CHAIN" || true
 
-    # MSS clamp helps when PMTUD is broken on some Iranian paths
     iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null \
-        || iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+        || iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
     IFS=',' read -ra PORT_ARR <<< "$PORTS"
     for p in "${PORT_ARR[@]}"; do
         [ -z "$p" ] && continue
-        iptables -t nat -A "$NAT_CHAIN" -p tcp --dport "$p" -j DNAT --to-destination 172.16.1.2:"$p"
-        iptables -t nat -A "$NAT_CHAIN" -p udp --dport "$p" -j DNAT --to-destination 172.16.1.2:"$p"
+        iptables -t nat -A "$NAT_CHAIN" -p tcp --dport "$p" -j DNAT --to-destination 172.16.1.2:"$p" || true
+        iptables -t nat -A "$NAT_CHAIN" -p udp --dport "$p" -j DNAT --to-destination 172.16.1.2:"$p" || true
     done
 
-    iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -j MASQUERADE
+    iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -j MASQUERADE || true
 
 elif [ "$MODE" = "kharej" ]; then
-    ip link add name GRE6 type ip6gre local "$LOCAL_V6" remote "$REMOTE_V6"
-    ip addr add 172.16.1.2/30 dev GRE6
+    ip link add name GRE6 type ip6gre local "$LOCAL_V6" remote "$REMOTE_V6" || exit 1
+    ip addr add 172.16.1.2/30 dev GRE6 || true
     ip link set GRE6 mtu "$MTU"
-    ip link set GRE6 up
+    ip link set GRE6 up || exit 1
 
     iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null \
-        || iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+        || iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 fi
 
 exit 0
